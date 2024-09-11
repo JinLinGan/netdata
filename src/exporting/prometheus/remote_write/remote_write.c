@@ -153,6 +153,24 @@ static int format_remote_write_label_callback(const char *name, const char *valu
     return 1;
 }
 
+struct write_label_callback {
+    struct instance *instance;
+    void *write_request;
+    char * k;
+    char * v;
+};
+
+static int write_label_callback(const char *name, const char *value, RRDLABEL_SRC ls __maybe_unused, void *data)
+{
+    struct write_label_callback *d = (struct write_label_callback *)data;
+
+    if (!should_send_label(d->instance, ls)) return 0;
+
+    prometheus_name_copy(d->k, name, PROMETHEUS_ELEMENT_MAX);
+    prometheus_label_copy(d->v, value, PROMETHEUS_ELEMENT_MAX);
+    add_label(d->write_request, d->k, d->v);
+    return 1;
+}
 /**
  * Format host data for Prometheus Remote Write connector
  *
@@ -239,6 +257,18 @@ int format_dimension_prometheus_remote_write(struct instance *instance, RRDDIM *
         char dimension[PROMETHEUS_ELEMENT_MAX + 1];
         char *suffix = "";
         RRDHOST *host = rd->rrdset->rrdhost;
+
+
+        if (unlikely(sending_labels_configured(instance))) {
+            struct write_label_callback tmp = {
+                .write_request = connector_specific_data->write_request,
+                .instance = instance,
+                .k = dimension,
+                .v = name
+
+            };
+            rrdlabels_walkthrough_read(host->rrdlabels, write_label_callback, &tmp);
+        }
 
         if (as_collected) {
             // we need as-collected / raw data
