@@ -136,7 +136,7 @@ int init_prometheus_remote_write_instance(struct instance *instance)
 
 struct format_remote_write_label_callback {
     struct instance *instance;
-    void *write_request;
+    void *connector_specific_data;
 };
 
 static int format_remote_write_label_callback(const char *name, const char *value, RRDLABEL_SRC ls __maybe_unused, void *data)
@@ -149,28 +149,10 @@ static int format_remote_write_label_callback(const char *name, const char *valu
 
     prometheus_name_copy(k, name, PROMETHEUS_ELEMENT_MAX);
     prometheus_label_copy(v, value, PROMETHEUS_ELEMENT_MAX);
-    add_label(d->write_request, k, v);
+    add_default_labels_to_request(k,v,d->connector_specific_data);
     return 1;
 }
 
-struct write_label_callback {
-    struct instance *instance;
-    void *write_request;
-    char * k;
-    char * v;
-};
-
-static int write_label_callback(const char *name, const char *value, RRDLABEL_SRC ls __maybe_unused, void *data)
-{
-    struct write_label_callback *d = (struct write_label_callback *)data;
-
-    if (!should_send_label(d->instance, ls)) return 0;
-
-    prometheus_name_copy(d->k, name, PROMETHEUS_ELEMENT_MAX);
-    prometheus_label_copy(d->v, value, PROMETHEUS_ELEMENT_MAX);
-    add_label(d->write_request, d->k, d->v);
-    return 1;
-}
 /**
  * Format host data for Prometheus Remote Write connector
  *
@@ -185,6 +167,17 @@ int format_host_prometheus_remote_write(struct instance *instance, RRDHOST *host
     struct prometheus_remote_write_specific_data *connector_specific_data =
         (struct prometheus_remote_write_specific_data *)simple_connector_data->connector_specific_data;
 
+
+    if (unlikely(sending_labels_configured(instance)) && !connector_specific_data->initialized) {
+        struct format_remote_write_label_callback tmp = {
+            .connector_specific_data = connector_specific_data,
+            .instance = instance
+        };
+        rrdlabels_walkthrough_read(host->rrdlabels, format_remote_write_label_callback, &tmp);
+        inited(connector_specific_data);
+    }
+
+
     char hostname[PROMETHEUS_ELEMENT_MAX + 1];
     prometheus_label_copy(
         hostname,
@@ -194,15 +187,7 @@ int format_host_prometheus_remote_write(struct instance *instance, RRDHOST *host
     add_host_info(
         connector_specific_data->write_request,
         "netdata_info", hostname, rrdhost_program_name(host), rrdhost_program_version(host), now_realtime_usec() / USEC_PER_MS);
-    
-    if (unlikely(sending_labels_configured(instance))) {
-        struct format_remote_write_label_callback tmp = {
-            .write_request = connector_specific_data->write_request,
-            .instance = instance
-        };
-        rrdlabels_walkthrough_read(host->rrdlabels, format_remote_write_label_callback, &tmp);
-    }
-
+    add_common_labels(connector_specific_data);
     return 0;
 }
 
@@ -258,18 +243,6 @@ int format_dimension_prometheus_remote_write(struct instance *instance, RRDDIM *
         char *suffix = "";
         RRDHOST *host = rd->rrdset->rrdhost;
 
-
-        if (unlikely(sending_labels_configured(instance))) {
-            struct write_label_callback tmp = {
-                .write_request = connector_specific_data->write_request,
-                .instance = instance,
-                .k = dimension,
-                .v = name
-
-            };
-            rrdlabels_walkthrough_read(host->rrdlabels, write_label_callback, &tmp);
-        }
-
         if (as_collected) {
             // we need as-collected / raw data
 
@@ -306,6 +279,7 @@ int format_dimension_prometheus_remote_write(struct instance *instance, RRDDIM *
                         name, chart, family, dimension,
                     (host == localhost) ? instance->config.hostname : rrdhost_hostname(host),
                         rd->collector.last_collected_value, timeval_msec(&rd->collector.last_collected_time));
+                add_common_labels(connector_specific_data);
             } else {
                 // the dimensions of the chart, do not have the same algorithm, multiplier or divisor
                 // we create a metric per dimension
@@ -323,6 +297,7 @@ int format_dimension_prometheus_remote_write(struct instance *instance, RRDDIM *
                         name, chart, family, NULL,
                     (host == localhost) ? instance->config.hostname : rrdhost_hostname(host),
                         rd->collector.last_collected_value, timeval_msec(&rd->collector.last_collected_time));
+                add_common_labels(connector_specific_data);
             }
         } else {
             // we need average or sum of the data
@@ -348,6 +323,7 @@ int format_dimension_prometheus_remote_write(struct instance *instance, RRDDIM *
                     name, chart, family, dimension,
                     (host == localhost) ? instance->config.hostname : rrdhost_hostname(host),
                     value, last_t * MSEC_PER_SEC);
+                add_common_labels(connector_specific_data);
             }
         }
     }
@@ -430,4 +406,31 @@ int format_batch_prometheus_remote_write(struct instance *instance)
     simple_connector_end_batch(instance);
 
     return 0;
+}
+
+
+void add_default_labels_to_request(char *key,char *value, struct prometheus_remote_write_specific_data *specific_data){
+
+    netdata_log_error("aaa copy labels key %s value %s", key, value);
+    if (specific_data->labels_count >= PROMETHEUS_LABELS_MAX) {
+        netdata_log_error("aaa EXPORTING: too many labels");
+        return;
+    }
+    strcpy(specific_data->keys[specific_data->labels_count] ,key);
+    strcpy(specific_data->values[specific_data->labels_count] ,value);
+
+    specific_data->labels_count++;
+
+
+}
+void inited(struct prometheus_remote_write_specific_data *specific_data){
+    specific_data->initialized = true;
+}
+
+void add_common_labels(struct prometheus_remote_write_specific_data *specific_data)
+{
+    // netdata_log_error("aaa apply common labels %d to request", specific_data->labels_count);
+    for (int i = 0; i < specific_data->labels_count; i++) {
+        add_label(specific_data->write_request, specific_data->keys[i], specific_data->values[i]);
+    }
 }
